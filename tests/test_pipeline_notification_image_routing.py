@@ -203,7 +203,7 @@ class TestPipelineWechatOnlyImageRouting(unittest.TestCase):
         pipeline.notifier._send_wechat_image.assert_not_called()
         pipeline.notifier.send_to_wechat.assert_called_once_with("dashboard-report")
         self.assertTrue(
-            any("企业微信 Markdown 转图片失败" in str(call.args[0]) for call in mock_warning.call_args_list)
+            any("WeChat Work Markdown-to-image conversion failed" in str(call.args[0]) for call in mock_warning.call_args_list)
         )
 
 
@@ -437,7 +437,7 @@ class TestPipelineReportRouteFiltering(unittest.TestCase):
         self.assertFalse(notification_runs[1]["success"])
         self.assertTrue(
             any(
-                call.args and call.args[0] == "决策仪表盘推送成功"
+                call.args and call.args[0] == "Decision dashboard push succeeded"
                 for call in mock_info.call_args_list
             )
         )
@@ -446,38 +446,6 @@ class TestPipelineReportRouteFiltering(unittest.TestCase):
         self.assertEqual([run.get("channel") for run in persisted_runs], ["__context__", "telegram"])
 
     def test_context_only_delivery_skips_static_channels_in_aggregate_path(self):
-        pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
-        pipeline.notifier = _FakeRoutedNotifier([NotificationChannel.TELEGRAM])
-        pipeline.notifier.send_to_context.return_value = True
-        pipeline.notifier.should_broadcast_static_channels = MagicMock(return_value=False)
-        pipeline.config = SimpleNamespace(stock_email_groups=[])
-        results = [SimpleNamespace(code="000001")]
-
-        pipeline._send_notifications(results, ReportType.SIMPLE)
-
-        pipeline.notifier.should_broadcast_static_channels.assert_called_once_with()
-        pipeline.notifier.send_to_telegram.assert_not_called()
-        pipeline.notifier.evaluate_noise_control.assert_not_called()
-        pipeline.notifier.record_noise_control.assert_not_called()
-        pipeline.notifier.release_noise_control.assert_not_called()
-
-    def test_dingtalk_context_only_delivery_skips_static_channels_in_aggregate_path(self):
-        pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
-        pipeline.notifier = _FakeRoutedNotifier([NotificationChannel.TELEGRAM])
-        pipeline.notifier.send_to_context.return_value = True
-        pipeline.notifier.should_broadcast_static_channels = MagicMock(return_value=False)
-        pipeline.config = SimpleNamespace(stock_email_groups=[])
-        results = [SimpleNamespace(code="000001")]
-
-        pipeline._send_notifications(results, ReportType.SIMPLE)
-
-        pipeline.notifier.should_broadcast_static_channels.assert_called_once_with()
-        pipeline.notifier.send_to_telegram.assert_not_called()
-        pipeline.notifier.evaluate_noise_control.assert_not_called()
-        pipeline.notifier.record_noise_control.assert_not_called()
-        pipeline.notifier.release_noise_control.assert_not_called()
-
-    def test_telegram_context_only_delivery_skips_static_channels_in_aggregate_path(self):
         pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
         pipeline.notifier = _FakeRoutedNotifier([NotificationChannel.TELEGRAM])
         pipeline.notifier.send_to_context.return_value = True

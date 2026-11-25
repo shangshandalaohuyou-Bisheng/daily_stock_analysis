@@ -1015,6 +1015,12 @@
 .text-purple {
   color: hsl(var(--color-purple));
 }
+.text-price-up {
+  color: var(--home-price-up);
+}
+.text-price-down {
+  color: var(--home-price-down);
+}
 .text-success {
   color: hsl(var(--color-success));
 }
@@ -1185,6 +1191,24 @@ textarea {
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
   box-shadow: var(--shadow-soft-card);
+}
+
+/*
+ * Keep the mobile home sidebar's layout shells out of the scroll chain.
+ * This rule is intentionally unlayered and more specific than .glass-card so
+ * Tailwind overflow utilities cannot silently restore clipping on these cards.
+ * The nested ScrollArea viewport remains the only vertical scroll container.
+ */
+.home-stock-scroll-shell,
+.glass-card.home-stock-scroll-shell {
+  overflow: visible;
+}
+
+@media (min-width: 48rem) {
+  .home-stock-scroll-shell,
+  .glass-card.home-stock-scroll-shell {
+    overflow: hidden;
+  }
 }
 
 .glass-card::before {
@@ -1913,11 +1937,17 @@ textarea {
   padding: 4px 6px;
 }
 
+.home-markdown-prose :where(td) {
+  /* Keep short labels and values readable when long text can break anywhere. */
+  min-width: 8ch;
+  overflow-wrap: anywhere;
+}
+
 .home-markdown-prose :where(table) {
   display: block;
   width: 100%;
   overflow-x: auto;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .home-markdown-prose :where(th) {
@@ -2903,4 +2933,9 @@ textarea {
   .backtest-table-scroll-hint {
     text-align: left;
   }
+}
+
+.num {
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-feature-settings: "tnum" 1, "zero" 1;
 }

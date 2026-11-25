@@ -54,6 +54,25 @@ class TestChunkContentByMaxWords(unittest.TestCase):
         self.assertGreaterEqual(len(result), 2)
         self.assertEqual("".join(result), text)
 
+    def test_level_one_heading_content_splits_without_recursive_failure(self):
+        part_a = "A" * 40
+        part_b = "B" * 40
+        text = f"{part_a}\n# Section\n{part_b}"
+
+        result = chunk_content_by_max_words(text, 60)
+
+        self.assertGreaterEqual(len(result), 2)
+        joined = "".join(result).replace(TRUNCATION_SUFFIX, "")
+        self.assertEqual(joined, text)
+
+    def test_long_level_one_section_does_not_duplicate_buffered_preamble(self):
+        text = "Intro\n# Section\n" + "B" * 2500
+
+        result = chunk_content_by_max_words(text, 2000)
+
+        joined = "".join(result).replace(TRUNCATION_SUFFIX, "")
+        self.assertEqual(joined, text)
+
     def test_long_content_without_separators_gets_force_split_with_suffix(self):
         long_text = "X" * 200
         result = chunk_content_by_max_words(long_text, 50)
@@ -130,6 +149,17 @@ class TestChunkContentByMaxBytes(unittest.TestCase):
         part_b = "B" * 150
         text = f"{part_a}\n---\n{part_b}"
         result = chunk_content_by_max_bytes(text, 200)
+        self.assertGreaterEqual(len(result), 2)
+        joined = "".join(result).replace(TRUNCATION_SUFFIX, "")
+        self.assertEqual(joined, text)
+
+    def test_level_one_heading_content_splits_without_recursive_failure(self):
+        part_a = "A" * 80
+        part_b = "B" * 80
+        text = f"{part_a}\n# Section\n{part_b}"
+
+        result = chunk_content_by_max_bytes(text, 100)
+
         self.assertGreaterEqual(len(result), 2)
         joined = "".join(result).replace(TRUNCATION_SUFFIX, "")
         self.assertEqual(joined, text)
@@ -423,6 +453,10 @@ class TestNotificationMarkdownFormatters(unittest.TestCase):
         self.assertIn("*\\[P4\\] 日报*", result)
         self.assertIn("- 600519：\\[P4\\] 强势 \\(观察\\)", result)
         self.assertIn("[详情](https://example.com/report)", result)
+
+    def test_telegram_formatter_preserves_text_that_looks_like_a_link_placeholder(self):
+        text = "@@DSA_TELEGRAM_LINK_0@@ [Source](https://example.org/news)"
+        self.assertEqual(format_telegram_markdown(text), text)
 
     def test_slack_formatter_uses_mrkdwn_links_and_tables(self):
         text = "## 日报\n\n| 股票 | 信号 |\n| --- | --- |\n| 600519 | 强势 |\n\n[详情](https://example.com/report)"

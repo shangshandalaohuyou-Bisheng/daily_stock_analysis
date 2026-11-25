@@ -98,11 +98,13 @@ class RealtimeSource(Enum):
     AKSHARE_SINA = "akshare_sina"   # 新浪财经
     AKSHARE_QQ = "akshare_qq"       # 腾讯财经
     TUSHARE = "tushare"             # Tushare Pro
+    TICKPLUS = "tickplus"           # TickPlus
     TICKFLOW = "tickflow"           # TickFlow
     TENCENT = "tencent"             # 腾讯直连
     SINA = "sina"                   # 新浪直连
     STOOQ = "stooq"                 # Stooq 美股兜底
     LONGBRIDGE = "longbridge"       # 长桥（美股/港股兜底）
+    FUTU = "futu"                   # 富途 OpenD（港股）
     FALLBACK = "fallback"           # 降级兜底
 
 
@@ -123,6 +125,7 @@ class UnifiedRealtimeQuote:
     # === 数据质量元数据（由 DataFetcherManager 统一补齐）===
     fetched_at: Optional[str] = None             # 本系统获取时间（ISO 8601 datetime）
     provider_timestamp: Optional[str] = None     # Provider 真实行情时间（ISO 8601 datetime）
+    quote_date: Optional[str] = None             # Provider 仅提供的行情交易日（无具体时间）
     is_stale: Optional[bool] = None              # provider_timestamp 超过最小 TTL 阈值时为 True
     stale_seconds: Optional[int] = None          # provider_timestamp 距 fetched_at 的秒数
     fallback_from: Optional[str] = None          # 整源 fallback 的失败首选源 token
@@ -169,7 +172,7 @@ class UnifiedRealtimeQuote:
         }
         # 只添加非 None 的字段
         optional_fields = [
-            'fetched_at', 'provider_timestamp', 'is_stale', 'stale_seconds',
+            'fetched_at', 'provider_timestamp', 'quote_date', 'is_stale', 'stale_seconds',
             'fallback_from', 'market', 'currency', 'data_quality', 'missing_fields',
             'price', 'change_pct', 'change_amount', 'volume', 'amount',
             'volume_ratio', 'turnover_rate', 'amplitude',
@@ -349,11 +352,11 @@ class CircuitBreaker:
                     state['state'] = self.HALF_OPEN
                     state['half_open_calls'] = 0
                     state['last_failure_time'] = current_time
-                    logger.info(f"[熔断器] {source} 冷却完成，进入半开状态")
+                    logger.info(f"[CircuitBreaker] {source} cooldown complete, entering half-open state")
                     # Fall through to HALF_OPEN check below
                 else:
                     remaining = self.cooldown_seconds - time_since_failure
-                    logger.debug(f"[熔断器] {source} 处于熔断状态，剩余冷却时间: {remaining:.0f}s")
+                    logger.debug(f"[CircuitBreaker] {source} is open, remaining cooldown: {remaining:.0f}s")
                     return False
 
             if state['state'] == self.HALF_OPEN:
@@ -367,7 +370,7 @@ class CircuitBreaker:
                 if time_since_failure >= self.cooldown_seconds:
                     state['half_open_calls'] = 1
                     state['last_failure_time'] = current_time
-                    logger.info(f"[熔断器] {source} 半开状态探测超时，重新探测")
+                    logger.info(f"[CircuitBreaker] {source} half-open probe timed out, re-probing")
                     return True
                 return False
 
@@ -385,7 +388,7 @@ class CircuitBreaker:
                 state['state'] = self.OPEN
                 state['half_open_calls'] = 0
                 state['last_failure_time'] = time.time()
-                logger.info(f"[熔断器] {source} 半开探测结果不确定，重新进入冷却")
+                logger.info(f"[CircuitBreaker] {source} half-open probe inconclusive, re-entering cooldown")
 
     def record_success(self, source: str) -> None:
         """记录成功请求"""
@@ -394,7 +397,7 @@ class CircuitBreaker:
 
             if state['state'] == self.HALF_OPEN:
                 # 半开状态下成功，完全恢复
-                logger.info(f"[熔断器] {source} 半开状态请求成功，恢复正常")
+                logger.info(f"[CircuitBreaker] {source} half-open request succeeded, recovered")
 
             # 重置状态
             state['state'] = self.CLOSED
@@ -414,14 +417,19 @@ class CircuitBreaker:
                 # 半开状态下失败，继续熔断
                 state['state'] = self.OPEN
                 state['half_open_calls'] = 0
-                logger.warning(f"[熔断器] {source} 半开状态请求失败，继续熔断 {self.cooldown_seconds}s")
+                logger.warning(
+                    f"[CircuitBreaker] {source} half-open request failed, "
+                    f"keeping circuit open for {self.cooldown_seconds}s"
+                )
             elif state['failures'] >= self.failure_threshold:
                 # 达到阈值，进入熔断
                 state['state'] = self.OPEN
-                logger.warning(f"[熔断器] {source} 连续失败 {state['failures']} 次，进入熔断状态 "
-                              f"(冷却 {self.cooldown_seconds}s)")
+                logger.warning(
+                    f"[CircuitBreaker] {source} failed {state['failures']} consecutive times, "
+                    f"opening circuit (cooldown {self.cooldown_seconds}s)"
+                )
                 if error:
-                    logger.warning(f"[熔断器] 最后错误: {error}")
+                    logger.warning(f"[CircuitBreaker] Last error: {error}")
     
     def get_status(self) -> Dict[str, str]:
         """获取所有数据源状态"""

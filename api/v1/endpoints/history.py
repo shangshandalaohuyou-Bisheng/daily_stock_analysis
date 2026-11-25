@@ -13,7 +13,7 @@ import logging
 from typing import Any, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Depends, Body
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, Response
 
 from api.deps import get_database_manager
 from api.v1.schemas.history import (
@@ -44,6 +44,7 @@ from src.report_language import (
     normalize_report_language,
 )
 from src.services.history_service import HistoryService, MarkdownReportGenerationError
+from src.services.analysis_service import asset_type_from_canonical_code
 from src.schemas.decision_action import build_action_fields
 from src.utils.data_processing import (
     normalize_model_used,
@@ -59,6 +60,11 @@ from src.analysis_context_pack_overview import (
 from src.market_phase_summary import extract_market_phase_summary
 from src.config import get_config
 from src.md2img import markdown_to_image
+from src.share_image import (
+    ShareImageBranding,
+    build_share_image_html,
+    share_image_branding_from_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,14 +86,74 @@ def _history_share_image_payload(result: Mapping[str, Any]) -> Optional[Mapping[
     return raw_result if isinstance(raw_result, Mapping) else None
 
 
-def _normalize_code_for_grouping(code: str) -> str:
-    """Normalize stock code for deduplication grouping.
+def _history_share_image_input(
+    record_id: str,
+    db_manager: DatabaseManager,
+) -> tuple[Mapping[str, Any], str]:
+    """Load the shared persisted input used by PNG and desktop HTML renderers."""
 
-    Delegates to data_provider.base.normalize_stock_code which handles
-    SH600519, 600519.SH, HK00700, 00700.HK, BJ920748, etc.
+    service = HistoryService(db_manager)
+    result = service.resolve_and_get_detail(record_id)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "not_found",
+                "message": f"未找到 id/query_id={record_id} 的分析记录",
+            },
+        )
+
+    try:
+        markdown_content = service.get_markdown_report(record_id)
+    except MarkdownReportGenerationError as exc:
+        logger.error("Share image report generation failed for %s: %s", record_id, exc.message)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "generation_failed",
+                "message": f"生成分享图片所需报告失败: {exc.message}",
+            },
+        ) from exc
+
+    if not markdown_content:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "not_found",
+                "message": f"未找到 id/query_id={record_id} 的报告内容",
+            },
+        )
+    return result, markdown_content
+
+
+def _history_share_image_branding(config: object) -> ShareImageBranding:
+    return share_image_branding_from_config(config)
+
+
+def _stock_bar_group_key(record_code: str, display_code: str) -> str:
+    """Build the stock-bar grouping key from the *persisted* code.
+
+    PR #2312: registered indices are typed by the persisted ``record.code``
+    (never guessed from the display code) and group by the parser canonical
+    (lowercase ``sh000016`` / ``csi930955``), so every explicit index form
+    (uppercase legacy / dotted alias) converges to one row and never folds
+    with the bare same-code stock. Stocks keep the legacy display-based
+    normalization (``SH600519``/``600519.SH`` -> ``600519``, JP/KR legacy bare
+    ``005930`` merging with ``005930.KS`` etc.), preserving existing semantics.
     """
     from data_provider.base import normalize_stock_code
-    return normalize_stock_code(code or "")
+    from src.services.stock_list_parser import ParseStatus, parse_analysis_target
+
+    code = str(record_code or "").strip()
+    if not code:
+        return normalize_stock_code(display_code or "")
+    try:
+        target = parse_analysis_target(code)
+    except Exception:
+        return normalize_stock_code(display_code or "")
+    if target.asset_type == ParseStatus.INDEX:
+        return target.canonical_id
+    return normalize_stock_code(display_code or "")
 
 
 def _raw_result_value(raw_result: Any, key: str) -> Any:
@@ -225,6 +291,7 @@ def get_history_list(
                 model_used=item.get("model_used"),
                 created_at=item.get("created_at"),
                 market_phase_summary=item.get("market_phase_summary"),
+                asset_type=item.get("asset_type"),
             )
             for item in result.get("items", [])
         ]
@@ -237,7 +304,7 @@ def get_history_list(
         )
         
     except Exception as e:
-        logger.error(f"查询历史列表失败: {e}", exc_info=True)
+        logger.error(f"Failed to query history list: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail={
@@ -293,7 +360,7 @@ def delete_history_by_code(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"按股票代码删除历史记录失败: {e}", exc_info=True)
+        logger.error(f"Failed to delete history records by stock code: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail={"error": "internal_error", "message": f"删除失败: {str(e)}"},
@@ -335,7 +402,7 @@ def delete_history_records(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"删除历史记录失败: {e}", exc_info=True)
+        logger.error(f"Failed to delete history records: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail={
@@ -382,13 +449,19 @@ def get_stock_bar(
         seen: dict = {}
         for record in records:
             display_code = service._display_stock_code(record.code or "")
-            norm_code = _normalize_code_for_grouping(display_code)
+            norm_code = _stock_bar_group_key(record.code or "", display_code)
             if norm_code not in seen or record.id > seen[norm_code].id:
                 seen[norm_code] = record
 
+        visible_records = [
+            (service._display_stock_code(record.code), record)
+            for record in list(seen.values())[:limit]
+        ]
+        analysis_counts = db_manager.get_analysis_history_counts({
+            code: service._history_code_filter_candidates(code) for code, _ in visible_records
+        })
         items = []
-        for norm_code in seen:
-            record = seen[norm_code]
+        for display_stock_code, record in visible_records:
             raw_result = parse_json_field(getattr(record, "raw_result", None))
             model_used = raw_result.get("model_used") if isinstance(raw_result, dict) else None
             sentiment_score = _coalesce_int(
@@ -411,11 +484,6 @@ def get_stock_bar(
                 align_with_score=True,
             )
 
-            display_stock_code = service._display_stock_code(record.code)
-            analysis_count = db_manager.get_analysis_history_paginated(
-                code=HistoryService._history_code_filter_candidates(display_stock_code),
-                limit=1,
-            )[1]
             items.append(
                 StockBarItem(
                     id=record.id,
@@ -426,21 +494,21 @@ def get_stock_bar(
                     operation_advice=operation_advice,
                     action=action_fields["action"],
                     action_label=action_fields["action_label"],
-                    analysis_count=analysis_count,
+                    analysis_count=analysis_counts[display_stock_code],
                     last_analysis_time=service._serialize_created_at(record.created_at),
                     model_used=normalize_model_used(model_used),
                     market_phase_summary=service._display_market_phase_summary(
                         record.code,
                         getattr(record, "context_snapshot", None),
                     ),
+                    asset_type=asset_type_from_canonical_code(record.code),
                 )
             )
 
-        items = items[:limit]
         return StockBarResponse(total=len(items), items=items)
 
     except Exception as e:
-        logger.error(f"查询个股栏失败: {e}", exc_info=True)
+        logger.error(f"Failed to query stock bar: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail={
@@ -540,6 +608,9 @@ def get_history_detail(
             change_pct=change_pct,
             model_used=normalize_model_used(result.get("model_used")),
             market_phase_summary=market_phase_summary,
+            asset_type=asset_type_from_canonical_code(
+                result.get("storage_stock_code") or result.get("stock_code")
+            ),
         )
         
         summary = ReportSummary(
@@ -588,6 +659,7 @@ def get_history_detail(
 
         details = ReportDetails(
             news_content=result.get("news_content"),
+            empty_news_disclosure=result.get("empty_news_disclosure"),
             raw_result=result.get("raw_result"),
             context_snapshot=api_context_snapshot,
             analysis_context_pack_overview=analysis_context_pack_overview,
@@ -609,7 +681,7 @@ def get_history_detail(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"查询历史详情失败: {e}", exc_info=True)
+        logger.error(f"Failed to query history details: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail={
@@ -652,7 +724,7 @@ def get_history_diagnostics(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"查询运行诊断摘要失败: {e}", exc_info=True)
+        logger.error(f"Failed to query run diagnostic summary: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail={
@@ -695,7 +767,7 @@ def get_history_run_flow(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"查询运行流快照失败: {e}", exc_info=True)
+        logger.error(f"Failed to query run flow snapshot: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail={
@@ -753,7 +825,7 @@ def get_history_news(
         )
 
     except Exception as e:
-        logger.error(f"查询新闻情报失败: {e}", exc_info=True)
+        logger.error(f"Failed to query news intelligence: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail={
@@ -761,6 +833,60 @@ def get_history_news(
                 "message": f"查询新闻情报失败: {str(e)}"
             }
         )
+
+
+@router.get(
+    "/{record_id}/share-image-html",
+    response_class=HTMLResponse,
+    responses={
+        200: {"description": "供桌面端内置 Chromium 渲染的分享图 HTML"},
+        404: {"description": "报告不存在", "model": ErrorResponse},
+        413: {"description": "报告内容超过分享图长度上限", "model": ErrorResponse},
+        500: {"description": "报告生成失败", "model": ErrorResponse},
+    },
+    summary="获取历史报告分享图 HTML",
+    description="根据历史报告与持久化结构化数据生成只供桌面端本地截图的确定性 HTML",
+)
+def get_history_share_image_html(
+    record_id: str,
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> HTMLResponse:
+    result, markdown_content = _history_share_image_input(record_id, db_manager)
+    config = get_config()
+    max_chars = getattr(config, "markdown_to_image_max_chars", 15000)
+    if len(markdown_content) > max_chars:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": "share_image_too_large",
+                "message": f"报告内容超过分享图片上限 {max_chars} 字符",
+            },
+        )
+
+    try:
+        html = build_share_image_html(
+            markdown_content,
+            structured_payload=_history_share_image_payload(result),
+            branding=_history_share_image_branding(config),
+        )
+    except Exception as exc:
+        logger.error("Share image HTML generation failed for %s: %s", record_id, exc)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "generation_failed",
+                "message": "生成桌面分享图片内容失败",
+            },
+        ) from exc
+
+    return HTMLResponse(
+        content=html,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get(
@@ -779,37 +905,7 @@ def get_history_share_image(
     record_id: str,
     db_manager: DatabaseManager = Depends(get_database_manager),
 ) -> Response:
-    service = HistoryService(db_manager)
-    result = service.resolve_and_get_detail(record_id)
-    if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "not_found",
-                "message": f"未找到 id/query_id={record_id} 的分析记录",
-            },
-        )
-
-    try:
-        markdown_content = service.get_markdown_report(record_id)
-    except MarkdownReportGenerationError as exc:
-        logger.error("Share image report generation failed for %s: %s", record_id, exc.message)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "generation_failed",
-                "message": f"生成分享图片所需报告失败: {exc.message}",
-            },
-        ) from exc
-
-    if not markdown_content:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "not_found",
-                "message": f"未找到 id/query_id={record_id} 的报告内容",
-            },
-        )
+    result, markdown_content = _history_share_image_input(record_id, db_manager)
 
     config = get_config()
     image_bytes = markdown_to_image(
@@ -884,7 +980,7 @@ def get_history_markdown(
             }
         )
     except Exception as e:
-        logger.error(f"获取 Markdown 报告失败: {e}", exc_info=True)
+        logger.error(f"Failed to get Markdown report: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail={

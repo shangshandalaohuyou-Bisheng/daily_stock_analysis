@@ -27,6 +27,33 @@ from src.services.screening.strategy import list_strategies, load_all_strategies
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCREENING_ROOT = REPO_ROOT / "src" / "services" / "screening"
 
+# Original code written for this repo, not derived from AlphaSift: the
+# bundled-engine derivation notice does not apply to these files. Keep
+# this list explicit — anything not listed here is still checked.
+ORIGINAL_SCREENING_FILES = frozenset({"factor_mapping.py"})
+
+
+def test_screening_modelflare_channel_uses_shared_default_endpoint() -> None:
+    from src.services.screening.config import _parse_llm_channels_env
+
+    with patch.dict(os.environ, {
+        "MODELFLARE_KEY": "sk-test",
+    }, clear=True):
+        channels = _parse_llm_channels_env()
+    assert channels[0]["base_url"] == "https://modelflare.dev/v1"
+    assert channels[0]["models"] == ["openai/gpt-6.1-sol"]
+
+
+def test_screening_modelflare_inherits_existing_global_model() -> None:
+    from src.services.screening.config import _parse_llm_channels_env
+
+    with patch.dict(os.environ, {
+        "LLM_CHANNELS": "modelflare", "LLM_MODELFLARE_API_KEY": "sk-test",
+        "LITELLM_MODEL": "openai/account-model",
+    }, clear=True):
+        channels = _parse_llm_channels_env()
+    assert channels[0]["models"] == ["openai/account-model"]
+
 
 def test_screening_engine_is_collected_from_the_internal_package() -> None:
     requirements = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
@@ -62,7 +89,16 @@ def test_bundled_engine_keeps_source_and_license_notices() -> None:
         *(SCREENING_ROOT / "strategies").glob("*.yaml"),
     ]
     assert derived_files
+    for name in ORIGINAL_SCREENING_FILES:
+        original_path = SCREENING_ROOT / name
+        assert original_path.is_file()
+        assert (
+            f"Derived from AlphaSift revision {REFERENCE_REVISION}."
+            not in original_path.read_text(encoding="utf-8")
+        )
     for path in derived_files:
+        if path.name in ORIGINAL_SCREENING_FILES:
+            continue
         source = path.read_text(encoding="utf-8")
         assert f"Derived from AlphaSift revision {REFERENCE_REVISION}." in source
 
@@ -200,6 +236,7 @@ def test_pipeline_passes_daily_history_cache_settings_to_enrichment(monkeypatch)
     assert captured["cache_ttl_seconds"] == 6 * 60 * 60
     assert captured["history_fetcher"] is history_fetcher
     assert result.daily_enriched is True
+    assert result.effective_factor_weights == {"value": 1.0}
 
 
 def test_dsa_post_analyzer_records_attempted_and_capped_statuses(monkeypatch) -> None:
